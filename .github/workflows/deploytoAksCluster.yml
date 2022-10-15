@@ -1,0 +1,65 @@
+on: [push]
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@master
+    
+    - uses: azure/docker-login@v1
+      with:
+        login-server: armyclusterregistry.azurecr.io
+        username: ${{ secrets.acr_armyclusterregistry_username }}
+        password: ${{ secrets.acr_armyclusterregistry_password }}
+    
+    - name: Build and push image to ACR
+      id: build-image
+      run: |
+        docker build "$GITHUB_WORKSPACE/" -f  "Dockerfile" -t armyclusterregistry.azurecr.io/armycluster:${{ github.sha }} --label dockerfile-path=Dockerfile
+        docker push armyclusterregistry.azurecr.io/armycluster:${{ github.sha }}
+    
+    - uses: azure/k8s-set-context@v1
+      with:
+         kubeconfig: ${{ secrets.aks_armycluster_kubeConfig }}
+      id: login
+    
+    - name: Create namespace
+      run: |
+        namespacePresent=`kubectl get namespace | grep armycluster9457 | wc -l`
+        if [ $namespacePresent -eq 0 ]
+        then
+            echo `kubectl create namespace armycluster9457`
+        fi
+
+    - uses: azure/k8s-create-secret@v1
+      with:
+        namespace: armycluster9457
+        container-registry-url: armyclusterregistry.azurecr.io
+        container-registry-username: ${{ secrets.acr_armyclusterregistry_username }}
+        container-registry-password: ${{ secrets.acr_armyclusterregistry_password }}
+        secret-name: armyclusterdockerauth
+       
+    - uses: azure/k8s-bake@v1
+      with:
+        renderEngine: 'helm'
+        helmChart: jsapp
+        releaseName: 'aks-helm-release'
+        helm-version: 'latest' 
+        silent: 'false'
+        overrideFiles: |
+          
+        overrides: |
+          replicas:2
+          image.repository:armyclusterregistry.azurecr.io/armycluster
+          image.tag:${{ github.sha }}
+          imagePullSecrets:
+            -name:armyclusterdockerauth
+      id: bake
+
+    - uses: azure/k8s-deploy@v1.2
+      with:
+        namespace: armycluster9457
+        manifests: ${{ steps.bake.outputs.manifestsBundle }}
+        images: |
+          armyclusterregistry.azurecr.io/armycluster:${{ github.sha }}
+        imagepullsecrets: |
+          armyclusterdockerauth
